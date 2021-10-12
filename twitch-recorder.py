@@ -11,6 +11,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
+import filelock
 import requests
 
 import config
@@ -132,46 +133,50 @@ class TwitchRecorder:
             time.sleep(self.refresh)
 
     def check(self, recorded_path, processed_path):
-        status, info = self.check_user()
-        if status == TwitchResponseStatus.NOT_FOUND:
-            logging.error("username not found, invalid username or typo")
-            time.sleep(self.refresh)
-        elif status == TwitchResponseStatus.ERROR:
-            logging.error("%s unexpected error. will try again in 5 minutes",
-                          datetime.datetime.now().strftime("%Hh%Mm%Ss"))
-            time.sleep(300)
-        elif status == TwitchResponseStatus.OFFLINE:
-            logging.info("%s currently offline, checking again in %s seconds", self.username, self.refresh)
-            time.sleep(self.refresh)
-        elif status == TwitchResponseStatus.UNAUTHORIZED:
-            logging.info("unauthorized, will attempt to log back in immediately")
-            self.access_token = self.fetch_access_token()
-        elif status == TwitchResponseStatus.ONLINE:
-            logging.info("%s online, stream recording in session", self.username)
+        try:
+            with filelock.FileLock(lock_file=recorded_path + '.lock', timeout=15.0) as lock:
+                status, info = self.check_user()
+                if status == TwitchResponseStatus.NOT_FOUND:
+                    logging.error("username not found, invalid username or typo")
+                    time.sleep(self.refresh)
+                elif status == TwitchResponseStatus.ERROR:
+                    logging.error("%s unexpected error. will try again in 5 minutes",
+                                  datetime.datetime.now().strftime("%Hh%Mm%Ss"))
+                    time.sleep(300)
+                elif status == TwitchResponseStatus.OFFLINE:
+                    logging.info("%s currently offline, checking again in %s seconds", self.username, self.refresh)
+                    time.sleep(self.refresh)
+                elif status == TwitchResponseStatus.UNAUTHORIZED:
+                    logging.info("unauthorized, will attempt to log back in immediately")
+                    self.access_token = self.fetch_access_token()
+                elif status == TwitchResponseStatus.ONLINE:
+                    logging.info("%s online, stream recording in session", self.username)
 
-            channels = info["data"]
-            channel = next(iter(channels), None)
-            filename = self.username + " - " + datetime.datetime.now() \
-                .strftime("%Y-%m-%d %Hh%Mm%Ss") + " - " + channel.get("title") + ".mp4"
+                    channels = info["data"]
+                    channel = next(iter(channels), None)
+                    filename = self.username + " - " + datetime.datetime.now() \
+                        .strftime("%Y-%m-%d %Hh%Mm%Ss") + " - " + channel.get("title") + ".mp4"
 
-            # clean filename from unnecessary characters
-            filename = "".join(x for x in filename if x.isalnum() or x in [" ", "-", "_", "."])
+                    # clean filename from unnecessary characters
+                    filename = "".join(x for x in filename if x.isalnum() or x in [" ", "-", "_", "."])
 
-            recorded_filename = os.path.join(recorded_path, filename)
-            processed_filename = os.path.join(processed_path, filename)
+                    recorded_filename = os.path.join(recorded_path, filename)
+                    processed_filename = os.path.join(processed_path, filename)
 
-            # start streamlink process
-            subprocess.call(
-                ["streamlink", "--twitch-disable-ads", "twitch.tv/" + self.username, self.quality,
-                 "-o", recorded_filename])
+                    # start streamlink process - lock on recorded_filename.lock
+                    subprocess.call(
+                        ["streamlink", "--twitch-disable-ads", "twitch.tv/" + self.username, self.quality,
+                         "-o", recorded_filename])
 
-            logging.info("recording stream is done, processing video file")
-            if os.path.exists(recorded_filename) is True:
-                self.process_recorded_file(recorded_filename, processed_filename)
-            else:
-                logging.info("skip fixing, file not found")
+                    logging.info("recording stream is done, processing video file")
+                    if os.path.exists(recorded_filename) is True:
+                        self.process_recorded_file(recorded_filename, processed_filename)
+                    else:
+                        logging.info("skip fixing, file not found")
 
-            logging.info("processing is done, going back to checking...")
+                    logging.info("processing is done, going back to checking...")
+        except filelock.Timeout:
+            return
 
 
 def main(argv):
@@ -214,8 +219,9 @@ def main(argv):
             list_of_futures = []
             while True:
                 # Block until load is low (ignore fairness for now)
-                while len(pool._work_queue.queue) > num_workers:
-                    concurrent.futures.as_completed(list_of_futures).__next__()
+                while len(list_of_futures) > num_workers:
+                    future = concurrent.futures.as_completed(list_of_futures).__next__()
+                    list_of_futures.remove(future)
 
                 # Update the usernames every time
                 with open('streamers.txt') as f:
