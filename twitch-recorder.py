@@ -1,3 +1,4 @@
+import concurrent
 import datetime
 import enum
 import getopt
@@ -7,6 +8,8 @@ import subprocess
 import sys
 import shutil
 import time
+from concurrent.futures import ThreadPoolExecutor
+from typing import Optional
 
 import requests
 
@@ -22,7 +25,7 @@ class TwitchResponseStatus(enum.Enum):
 
 
 class TwitchRecorder:
-    def __init__(self):
+    def __init__(self, username: Optional[str] = None):
         # global configuration
         self.ffmpeg_path = "ffmpeg"
         self.disable_ffmpeg = False
@@ -30,7 +33,7 @@ class TwitchRecorder:
         self.root_path = config.root_path
 
         # user configuration
-        self.username = config.username
+        self.username = username if username is not None else config.username
         self.quality = "best"
 
         # twitch configuration
@@ -47,7 +50,7 @@ class TwitchRecorder:
         token = token_response.json()
         return token["access_token"]
 
-    def run(self):
+    def run(self, once = False):
         # path to recorded stream
         recorded_path = os.path.join(self.root_path, "recorded", self.username)
         # path to finished video, errors removed
@@ -77,9 +80,14 @@ class TwitchRecorder:
         except Exception as e:
             logging.error(e)
 
-        logging.info("checking for %s every %s seconds, recording with %s quality",
-                     self.username, self.refresh, self.quality)
-        self.loop_check(recorded_path, processed_path)
+        if once:
+            logging.info("checking for %s, recording with %s quality",
+                         self.username, self.quality)
+            self.check(recorded_path, processed_path)
+        else:
+            logging.info("checking for %s every %s seconds, recording with %s quality",
+                         self.username, self.refresh, self.quality)
+            self.loop_check(recorded_path, processed_path)
 
     def process_recorded_file(self, recorded_filename, processed_filename):
         if self.disable_ffmpeg:
@@ -120,51 +128,55 @@ class TwitchRecorder:
 
     def loop_check(self, recorded_path, processed_path):
         while True:
-            status, info = self.check_user()
-            if status == TwitchResponseStatus.NOT_FOUND:
-                logging.error("username not found, invalid username or typo")
-                time.sleep(self.refresh)
-            elif status == TwitchResponseStatus.ERROR:
-                logging.error("%s unexpected error. will try again in 5 minutes",
-                              datetime.datetime.now().strftime("%Hh%Mm%Ss"))
-                time.sleep(300)
-            elif status == TwitchResponseStatus.OFFLINE:
-                logging.info("%s currently offline, checking again in %s seconds", self.username, self.refresh)
-                time.sleep(self.refresh)
-            elif status == TwitchResponseStatus.UNAUTHORIZED:
-                logging.info("unauthorized, will attempt to log back in immediately")
-                self.access_token = self.fetch_access_token()
-            elif status == TwitchResponseStatus.ONLINE:
-                logging.info("%s online, stream recording in session", self.username)
+            self.check(recorded_path, processed_path)
+            time.sleep(self.refresh)
 
-                channels = info["data"]
-                channel = next(iter(channels), None)
-                filename = self.username + " - " + datetime.datetime.now() \
-                    .strftime("%Y-%m-%d %Hh%Mm%Ss") + " - " + channel.get("title") + ".mp4"
+    def check(self, recorded_path, processed_path):
+        status, info = self.check_user()
+        if status == TwitchResponseStatus.NOT_FOUND:
+            logging.error("username not found, invalid username or typo")
+            time.sleep(self.refresh)
+        elif status == TwitchResponseStatus.ERROR:
+            logging.error("%s unexpected error. will try again in 5 minutes",
+                          datetime.datetime.now().strftime("%Hh%Mm%Ss"))
+            time.sleep(300)
+        elif status == TwitchResponseStatus.OFFLINE:
+            logging.info("%s currently offline, checking again in %s seconds", self.username, self.refresh)
+            time.sleep(self.refresh)
+        elif status == TwitchResponseStatus.UNAUTHORIZED:
+            logging.info("unauthorized, will attempt to log back in immediately")
+            self.access_token = self.fetch_access_token()
+        elif status == TwitchResponseStatus.ONLINE:
+            logging.info("%s online, stream recording in session", self.username)
 
-                # clean filename from unnecessary characters
-                filename = "".join(x for x in filename if x.isalnum() or x in [" ", "-", "_", "."])
+            channels = info["data"]
+            channel = next(iter(channels), None)
+            filename = self.username + " - " + datetime.datetime.now() \
+                .strftime("%Y-%m-%d %Hh%Mm%Ss") + " - " + channel.get("title") + ".mp4"
 
-                recorded_filename = os.path.join(recorded_path, filename)
-                processed_filename = os.path.join(processed_path, filename)
+            # clean filename from unnecessary characters
+            filename = "".join(x for x in filename if x.isalnum() or x in [" ", "-", "_", "."])
 
-                # start streamlink process
-                subprocess.call(
-                    ["streamlink", "--twitch-disable-ads", "twitch.tv/" + self.username, self.quality,
-                     "-o", recorded_filename])
+            recorded_filename = os.path.join(recorded_path, filename)
+            processed_filename = os.path.join(processed_path, filename)
 
-                logging.info("recording stream is done, processing video file")
-                if os.path.exists(recorded_filename) is True:
-                    self.process_recorded_file(recorded_filename, processed_filename)
-                else:
-                    logging.info("skip fixing, file not found")
+            # start streamlink process
+            subprocess.call(
+                ["streamlink", "--twitch-disable-ads", "twitch.tv/" + self.username, self.quality,
+                 "-o", recorded_filename])
 
-                logging.info("processing is done, going back to checking...")
-                time.sleep(self.refresh)
+            logging.info("recording stream is done, processing video file")
+            if os.path.exists(recorded_filename) is True:
+                self.process_recorded_file(recorded_filename, processed_filename)
+            else:
+                logging.info("skip fixing, file not found")
+
+            logging.info("processing is done, going back to checking...")
 
 
 def main(argv):
     twitch_recorder = TwitchRecorder()
+    specified_username = False
     usage_message = "twitch-recorder.py -u <username> -q <quality>"
     logging.basicConfig(filename="twitch-recorder.log", level=logging.INFO)
     logging.getLogger().addHandler(logging.StreamHandler())
@@ -180,6 +192,7 @@ def main(argv):
             sys.exit()
         elif opt in ("-u", "--username"):
             twitch_recorder.username = arg
+            specified_username = True
         elif opt in ("-q", "--quality"):
             twitch_recorder.quality = arg
         elif opt in ("-l", "--log", "--logging"):
@@ -192,7 +205,27 @@ def main(argv):
             twitch_recorder.disable_ffmpeg = True
             logging.info("ffmpeg disabled")
 
-    twitch_recorder.run()
+    if specified_username:
+        twitch_recorder.run()
+    else:
+        num_workers = 4
+
+        with ThreadPoolExecutor(max_workers=num_workers) as pool:
+            list_of_futures = []
+            while True:
+                # Block until load is low (ignore fairness for now)
+                while len(pool._work_queue.queue) > num_workers:
+                    concurrent.futures.as_completed(list_of_futures).__next__()
+
+                # Update the usernames every time
+                with open('streamers.txt') as f:
+                    twitch_usernames = [line.rstrip() for line in f if
+                                        line.rstrip() is not None and len(line.rstrip()) > 1]
+                    recorders = [TwitchRecorder(username=username) for username in twitch_usernames]
+                    new_futures = [pool.submit(recorder.run, True) for recorder in recorders]
+
+                    list_of_futures.extend(new_futures)
+
 
 
 if __name__ == "__main__":
