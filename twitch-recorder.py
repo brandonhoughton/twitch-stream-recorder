@@ -15,6 +15,7 @@ import filelock
 import requests
 
 import config
+import coloredlogs
 
 
 class TwitchResponseStatus(enum.Enum):
@@ -26,7 +27,10 @@ class TwitchResponseStatus(enum.Enum):
 
 
 class TwitchRecorder:
-    def __init__(self, username: Optional[str] = None):
+    def __init__(self,
+                 username: Optional[str] = None,
+                 logger: Optional[logging.Logger] = None,
+                 access_token: Optional[dict] = None):
         # global configuration
         self.ffmpeg_path = "ffmpeg"
         self.disable_ffmpeg = False
@@ -43,13 +47,22 @@ class TwitchRecorder:
         self.token_url = "https://id.twitch.tv/oauth2/token?client_id=" + self.client_id + "&client_secret=" \
                          + self.client_secret + "&grant_type=client_credentials"
         self.url = "https://api.twitch.tv/helix/streams"
-        self.access_token = self.fetch_access_token()
+        self.access_token = access_token if access_token is not None else TwitchRecorder.fetch_access_token()
 
-    def fetch_access_token(self):
-        token_response = requests.post(self.token_url, timeout=15)
+        # logger
+        self.logger = logger
+
+    @staticmethod
+    def fetch_access_token():
+        client_id = config.client_id
+        client_secret = config.client_secret
+        token_url = "https://id.twitch.tv/oauth2/token?client_id=" + client_id + "&client_secret=" \
+                         + client_secret + "&grant_type=client_credentials"
+        token_response = requests.post(token_url, timeout=15)
         token_response.raise_for_status()
         token = token_response.json()
         return token["access_token"]
+
 
     def run(self, once = False):
         # path to recorded stream
@@ -65,15 +78,15 @@ class TwitchRecorder:
 
         # make sure the interval to check user availability is not less than 15 seconds
         if self.refresh < 15:
-            logging.warning("check interval should not be lower than 15 seconds")
+            self.logger.warning("check interval should not be lower than 15 seconds")
             self.refresh = 15
-            logging.info("system set check interval to 15 seconds")
+            self.logger.info("system set check interval to 15 seconds")
 
         # fix videos from previous recording session
         try:
             video_list = [f for f in os.listdir(recorded_path) if os.path.isfile(os.path.join(recorded_path, f))]
             if len(video_list) > 0:
-                logging.info("processing previously recorded files")
+                self.logger.info("processing previously recorded files")
             for f in video_list:
                 recorded_filename = os.path.join(recorded_path, f)
                 processed_filename = os.path.join(processed_path, f)
@@ -82,7 +95,7 @@ class TwitchRecorder:
             logging.error(e)
 
         if once:
-            logging.info("checking for %s, recording with %s quality",
+            self.logger.debug("checking for %s, recording with %s quality",
                          self.username, self.quality)
             self.check(recorded_path, processed_path)
         else:
@@ -134,7 +147,7 @@ class TwitchRecorder:
 
     def check(self, recorded_path, processed_path):
         try:
-            with filelock.FileLock(lock_file=recorded_path + '.lock', timeout=15.0) as lock:
+            with filelock.FileLock(lock_file=recorded_path + '.lock', timeout=0.05) as lock:
                 status, info = self.check_user()
                 if status == TwitchResponseStatus.NOT_FOUND:
                     logging.error("username not found, invalid username or typo")
@@ -147,8 +160,8 @@ class TwitchRecorder:
                     logging.info("%s currently offline, checking again in %s seconds", self.username, self.refresh)
                     time.sleep(self.refresh)
                 elif status == TwitchResponseStatus.UNAUTHORIZED:
-                    logging.info("unauthorized, will attempt to log back in immediately")
-                    self.access_token = self.fetch_access_token()
+                    logging.warning("unauthorized, will attempt to log back in immediately")
+                    self.access_token = TwitchRecorder.fetch_access_token()
                 elif status == TwitchResponseStatus.ONLINE:
                     logging.info("%s online, stream recording in session", self.username)
 
@@ -164,9 +177,12 @@ class TwitchRecorder:
                     processed_filename = os.path.join(processed_path, filename)
 
                     # start streamlink process - lock on recorded_filename.lock
-                    subprocess.call(
+                    self.logger.info("Recording user %s", self.username)
+                    subprocess.run(
                         ["streamlink", "--twitch-disable-ads", "twitch.tv/" + self.username, self.quality,
-                         "-o", recorded_filename])
+                         "-o", recorded_filename],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.PIPE)
 
                     logging.info("recording stream is done, processing video file")
                     if os.path.exists(recorded_filename) is True:
@@ -183,8 +199,10 @@ def main(argv):
     twitch_recorder = TwitchRecorder()
     specified_username = False
     usage_message = "twitch-recorder.py -u <username> -q <quality>"
-    logging.basicConfig(filename="twitch-recorder.log", level=logging.INFO)
-    logging.getLogger().addHandler(logging.StreamHandler())
+    logging.basicConfig(filename="twitch-recorder.log", level=logging.DEBUG)
+    # logging.getLogger().addHandler(logging.StreamHandler())
+    logger = logging.getLogger(__name__)
+    coloredlogs.install(level="DEBUG", logger=logger)
 
     try:
         opts, args = getopt.getopt(argv, "hu:q:l:", ["username=", "quality=", "log=", "logging=", "disable-ffmpeg"])
@@ -225,9 +243,10 @@ def main(argv):
 
                 # Update the usernames every time
                 with open('streamers.txt') as f:
+                    access_token = TwitchRecorder.fetch_access_token()
                     twitch_usernames = [line.rstrip() for line in f if
                                         line.rstrip() is not None and len(line.rstrip()) > 1]
-                    recorders = [TwitchRecorder(username=username) for username in twitch_usernames]
+                    recorders = [TwitchRecorder(username=username, logger=logger, access_token=access_token) for username in twitch_usernames]
                     new_futures = [pool.submit(recorder.run, True) for recorder in recorders]
 
                     list_of_futures.extend(new_futures)
