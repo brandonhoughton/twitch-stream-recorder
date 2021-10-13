@@ -50,7 +50,7 @@ class TwitchRecorder:
         self.access_token = access_token if access_token is not None else TwitchRecorder.fetch_access_token()
 
         # logger
-        self.logger = logger
+        self.logger = logger if logger is not None else logging.getLogger(__name__)
 
     @staticmethod
     def fetch_access_token():
@@ -114,7 +114,12 @@ class TwitchRecorder:
     def ffmpeg_copy_and_fix_errors(self, recorded_filename, processed_filename):
         try:
             subprocess.call(
-                [self.ffmpeg_path, "-err_detect", "ignore_err", "-i", recorded_filename, "-c", "copy",
+                [self.ffmpeg_path,
+                 "-err_detect", "ignore_err",
+                 "-i", recorded_filename,
+                 "-vf", "scale=480:360",
+                 "-preset", "slow",
+                 "-crf", "18",
                  processed_filename])
             os.remove(recorded_filename)
         except Exception as e:
@@ -231,7 +236,7 @@ def main(argv):
     if specified_username:
         twitch_recorder.run()
     else:
-        num_workers = 4
+        num_workers = 6
 
         with ThreadPoolExecutor(max_workers=num_workers) as pool:
             list_of_futures = []
