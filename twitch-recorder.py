@@ -85,12 +85,15 @@ class TwitchRecorder:
         # fix videos from previous recording session
         try:
             video_list = [f for f in os.listdir(recorded_path) if os.path.isfile(os.path.join(recorded_path, f))]
-            if len(video_list) > 0:
-                self.logger.info("processing previously recorded files")
             for f in video_list:
-                recorded_filename = os.path.join(recorded_path, f)
-                processed_filename = os.path.join(processed_path, f)
-                self.process_recorded_file(recorded_filename, processed_filename)
+                try:
+                    self.logger.info("processing %s", processed_path)
+                    with filelock.FileLock(lock_file=recorded_path + '.lock', timeout=0) as lock:
+                        recorded_filename = os.path.join(recorded_path, f)
+                        processed_filename = os.path.join(processed_path, f)
+                        self.process_recorded_file(recorded_filename, processed_filename)
+                except filelock.Timeout:
+                    continue
         except Exception as e:
             logging.error(e)
 
@@ -152,7 +155,7 @@ class TwitchRecorder:
 
     def check(self, recorded_path, processed_path):
         try:
-            with filelock.FileLock(lock_file=recorded_path + '.lock', timeout=0.05) as lock:
+            with filelock.FileLock(lock_file=recorded_path + '.lock', timeout=0) as lock:
                 status, info = self.check_user()
                 if status == TwitchResponseStatus.NOT_FOUND:
                     logging.error("username not found, invalid username or typo")
@@ -165,8 +168,10 @@ class TwitchRecorder:
                     logging.info("%s currently offline, checking again in %s seconds", self.username, self.refresh)
                     time.sleep(self.refresh)
                 elif status == TwitchResponseStatus.UNAUTHORIZED:
-                    logging.warning("unauthorized, will attempt to log back in immediately")
-                    self.access_token = TwitchRecorder.fetch_access_token()
+                    pass
+                    # TODO we should refresh the global auth token
+                    # logging.warning("unauthorized, will attempt to log back in immediately")
+                    # self.access_token = TwitchRecorder.fetch_access_token()
                 elif status == TwitchResponseStatus.ONLINE:
                     logging.info("%s online, stream recording in session", self.username)
 
@@ -206,7 +211,7 @@ def main(argv):
     usage_message = "twitch-recorder.py -u <username> -q <quality>"
     logging.basicConfig(filename="twitch-recorder.log", level=logging.DEBUG)
     # logging.getLogger().addHandler(logging.StreamHandler())
-    logger = logging.getLogger(__name__)
+    logger = logging.getLogger()
     coloredlogs.install(level="DEBUG", logger=logger)
 
     try:
@@ -236,7 +241,7 @@ def main(argv):
     if specified_username:
         twitch_recorder.run()
     else:
-        num_workers = 6
+        num_workers = 4
 
         with ThreadPoolExecutor(max_workers=num_workers) as pool:
             list_of_futures = []
