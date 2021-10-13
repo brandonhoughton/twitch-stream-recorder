@@ -84,16 +84,15 @@ class TwitchRecorder:
 
         # fix videos from previous recording session
         try:
-            video_list = [f for f in os.listdir(recorded_path) if os.path.isfile(os.path.join(recorded_path, f))]
-            for f in video_list:
-                try:
+            with filelock.FileLock(lock_file='ffmpg-processing.lock', timeout=0) as lock:
+                video_list = [f for f in os.listdir(recorded_path) if os.path.isfile(os.path.join(recorded_path, f))]
+                for f in video_list:
                     self.logger.info("processing %s", processed_path)
-                    with filelock.FileLock(lock_file=recorded_path + '.lock', timeout=0) as lock:
-                        recorded_filename = os.path.join(recorded_path, f)
-                        processed_filename = os.path.join(processed_path, f)
-                        self.process_recorded_file(recorded_filename, processed_filename)
-                except filelock.Timeout:
-                    continue
+                    recorded_filename = os.path.join(recorded_path, f)
+                    processed_filename = os.path.join(processed_path, f)
+                    self.process_recorded_file(recorded_filename, processed_filename)
+        except filelock.Timeout:
+            pass
         except Exception as e:
             logging.error(e)
 
