@@ -119,10 +119,16 @@ class TwitchRecorder:
                 [self.ffmpeg_path,
                  "-err_detect", "ignore_err",
                  "-i", recorded_filename,
-                 "-vf", "scale=480:360",
-                 "-preset", "slow",
-                 "-crf", "18",
+                 "-c", "copy",
                  processed_filename])
+             # subprocess.call(
+             #    [self.ffmpeg_path,
+             #     "-err_detect", "ignore_err",
+             #     "-i", recorded_filename,
+             #     "-vf", "scale=480:360",
+             #     "-preset", "fast",
+             #     "-crf", "18",
+             #     processed_filename])
             os.remove(recorded_filename)
         except Exception as e:
             logging.error(e)
